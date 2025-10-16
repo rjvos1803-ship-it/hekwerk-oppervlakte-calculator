@@ -1,7 +1,9 @@
-# Hekwerk-oppervlakte-calculator — Streamlit Cloud
-Deze build gebruikt **pypdfium2** i.p.v. pdf2image/Poppler zodat PDF-upload werkt op Streamlit Community Cloud.
+# Hekwerk-oppervlakte-calculator — Streamlit Cloud (volledige versie)
+- PDF-ondersteuning via pypdfium2 (geen Poppler nodig)
+- Vastgezette versies + compatibiliteitspatch voor streamlit-drawable-canvas
+- Main file path = app.py
 
-**Deploy:**
+**Deploy (Streamlit Cloud):**
 - Repository: <jouw_gebruiker>/hekwerk-oppervlakte-calculator
 - Branch: main
 - Main file path: app.py
