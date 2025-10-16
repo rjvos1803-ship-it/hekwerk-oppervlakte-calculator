@@ -1,6 +1,6 @@
-streamlit
-streamlit-drawable-canvas
-pypdfium2
+streamlit==1.26.0
+streamlit-drawable-canvas==0.9.3
+pypdfium2==4.30.0
 pillow
 pandas
 numpy
