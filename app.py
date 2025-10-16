@@ -1,67 +1,45 @@
-# Hekwerk-oppervlakte-calculator — Streamlit (v2, multipage + deployable)
-# ---------------------------------------------------------------------
-# Nieuwe features in v2:
-# ✅ Meerdere PDF-pagina’s met pagina-selector (schaal per pagina)
-# ✅ Per-lijn **diameter** aanpasbaar via een **editable tabel** (st.data_editor)
-# ✅ Project-export (JSON) + CSV-export resultaten
-# ✅ Klaar te draaien in **Docker** of als **Windows .exe** (PyInstaller)
-#
-# Benodigdheden (pip):
-#   pip install streamlit streamlit-drawable-canvas pdf2image pillow pandas numpy
-# Optioneel (voor JSON validatie):
-#   pip install pydantic
-#
-# Voor PDF-rendering is Poppler vereist.
-# Start lokaal:  streamlit run app.py
-# Docker build:  docker build -t hekwerk-app .  |  docker run -p 8501:8501 hekwerk-app
-# PyInstaller:   pyinstaller --onefile --add-data "assets;assets" app.py
+# Hekwerk-oppervlakte-calculator — Streamlit (Cloud build)
+# - PDF rendering via pypdfium2 (no Poppler required)
+# - Multipage PDF support, scale per page, editable diameters, CSV/JSON export
 
 import io
 import json
 import math
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
-import numpy as np
 import pandas as pd
 from PIL import Image
 import streamlit as st
 from streamlit_drawable_canvas import st_canvas
 
+# --- PDF rendering (Streamlit Cloud friendly) ---
 try:
-    from pdf2image import convert_from_bytes
-    PDF2IMAGE_OK = True
+    import pypdfium2 as pdfium
+    PDF_RENDERER = "pdfium"
 except Exception:
-    PDF2IMAGE_OK = False
+    PDF_RENDERER = None
 
-# -----------------------------
-# Config
-# -----------------------------
 st.set_page_config(page_title="Hekwerk-oppervlakte-calculator", layout="wide")
-st.title("🔧 Hekwerk-oppervlakte-calculator — v2")
+st.title("🔧 Hekwerk-oppervlakte-calculator")
 
 st.markdown(
     """
     **Workflow**
-    1. **Upload** de tekening (PDF of afbeelding). Bij PDF kun je de **pagina** kiezen.
-    2. **Schaal** zetten per pagina: teken een **rechte schaal-lijn** over een bekende maat en vul de lengte (mm) in.
-    3. **Annoteren**: *rechthoeken* = **panelen/plaat**, *lijnen* = **palen/buizen**.
-    4. **Resultaten** verschijnen live. Je kunt **diameters per lijn** aanpassen in de tabel.
-    5. **Exporteer** CSV of **project-JSON** (voor hergebruik / audit).
+    1. **Upload** tekening (PDF of afbeelding). Bij PDF kun je de **pagina** kiezen.
+    2. Zet de **schaal** op de huidige pagina: teken een **rechte lijn** over een bekende maat en vul de lengte (mm) in.
+    3. Teken *rechthoeken* (panelen/plaat) en *lijnen* (palen/buizen).
+    4. Pas **diameters per lijn** aan in de tabel, en **exporteer** CSV/JSON.
     """
 )
 
-# -----------------------------
-# Helpers & State
-# -----------------------------
 @dataclass
 class Scale:
     px_per_mm: Optional[float] = None
 
-
 def ensure_state():
     if "pages" not in st.session_state:
-        st.session_state.pages = []              # list[PIL.Image]
+        st.session_state.pages = []
     if "page_scales" not in st.session_state:
         st.session_state.page_scales: Dict[int, float] = {}
     if "diameter_overrides" not in st.session_state:
@@ -69,37 +47,38 @@ def ensure_state():
     if "results_df" not in st.session_state:
         st.session_state.results_df = pd.DataFrame()
 
-
 def load_pages(file_bytes: bytes, filename: str) -> List[Image.Image]:
     suffix = filename.lower().split(".")[-1]
     if suffix in {"png", "jpg", "jpeg", "bmp", "tiff"}:
         img = Image.open(io.BytesIO(file_bytes)).convert("RGB")
         return [img]
     elif suffix == "pdf":
-        if not PDF2IMAGE_OK:
-            st.error("pdf2image niet beschikbaar. Installeer 'pdf2image' en 'poppler'.")
+        if PDF_RENDERER != "pdfium":
+            st.error("PDF-rendering niet beschikbaar. Installeer 'pypdfium2'.")
             st.stop()
-        pages = convert_from_bytes(file_bytes, dpi=200)
+        pdf = pdfium.PdfDocument(io.BytesIO(file_bytes))
+        dpi = 200
+        scale = dpi / 72.0
+        pages = []
+        for i in range(len(pdf)):
+            page = pdf[i]
+            pil = page.render(scale=scale).to_pil().convert("RGB")
+            pages.append(pil)
         if not pages:
             st.error("Kon de PDF niet renderen.")
             st.stop()
-        return [p.convert("RGB") for p in pages]
+        return pages
     else:
         st.error("Bestandstype niet ondersteund.")
         st.stop()
-
 
 def canvas_objects(canvas_json):
     if not canvas_json or not canvas_json.get("objects"):
         return []
     return canvas_json["objects"]
 
-
 ensure_state()
 
-# -----------------------------
-# Sidebar
-# -----------------------------
 with st.sidebar:
     st.header("Instellingen")
     coat_both_sides = st.checkbox("Panels dubbelzijdig coaten?", value=True)
@@ -112,9 +91,6 @@ with st.sidebar:
     st.markdown("**Import project**")
     project_file = st.file_uploader("Laad project JSON", type=["json"], key="project_json")
 
-# -----------------------------
-# Upload bestand
-# -----------------------------
 upload = st.file_uploader("Upload PDF of afbeelding van de tekening", type=["pdf", "png", "jpg", "jpeg", "bmp", "tiff"], key="drawing")
 if not upload and not st.session_state.pages:
     st.info("Upload een tekening om te beginnen.")
@@ -128,19 +104,17 @@ num_pages = len(pages)
 page_idx = 0
 if num_pages > 1:
     page_idx = st.number_input("Pagina", min_value=1, max_value=num_pages, value=1, step=1) - 1
+
 base_img = pages[page_idx]
 W, H = base_img.size
 
 col_scale, col_draw = st.columns([1, 2])
 
-# -----------------------------
-# 1) SCHAAL ZETTEN (per pagina)
-# -----------------------------
 with col_scale:
-    st.subheader("1) Schaal zetten")
-    st.caption("Teken een **rechte lijn** over een bekende maat op **deze pagina** en vul de **werkelijke lengte (mm)** in.")
+    st.subheader("1) Schaal zetten (per pagina)")
+    st.caption("Teken een **rechte lijn** over een bekende maat en vul **lengte (mm)** in.")
 
-    scale_len_mm = st.number_input("Werkelijke lengte van de schaal-lijn (mm)", min_value=0.0, step=1.0, value=1000.0, key=f"scale_len_mm_{page_idx}")
+    scale_len_mm = st.number_input("Werkelijke lengte (mm)", min_value=0.0, step=1.0, value=1000.0, key=f"scale_len_mm_{page_idx}")
 
     scale_canvas = st_canvas(
         fill_color="rgba(255, 165, 0, 0.2)",
@@ -175,12 +149,8 @@ with col_scale:
         else:
             st.warning("Teken een lijn en vul de werkelijke lengte in mm.")
 
-# -----------------------------
-# 2) OBJECTEN TEKENEN
-# -----------------------------
 with col_draw:
-    st.subheader("2) Objecten tekenen en automatisch berekenen")
-
+    st.subheader("2) Objecten tekenen en berekenen")
     tabs = st.tabs(["Panelen (rechthoeken)", "Palen/Buizen (lijnen)"])
 
     with tabs[0]:
@@ -200,7 +170,7 @@ with col_draw:
         panel_objs = canvas_objects(panel_canvas.json_data)
 
     with tabs[1]:
-        st.caption("Teken **lijnen** voor palen/buizen. Pas daarna de **diameter per lijn** aan in de tabel.")
+        st.caption("Teken **lijnen** voor palen/buizen. Diameter kun je zo aanpassen in de tabel.")
         post_canvas = st_canvas(
             fill_color="rgba(0,0,0,0)",
             stroke_width=3,
@@ -215,14 +185,10 @@ with col_draw:
         )
         post_objs = canvas_objects(post_canvas.json_data)
 
-# -----------------------------
-# 3) BEREKENEN + EDITABLE DIAMETERS
-# -----------------------------
 rows: List[dict] = []
 page_label = f"p{page_idx+1}"
 
 if px_per_mm:
-    # Panels
     if panel_objs:
         for i, o in enumerate(panel_objs, start=1):
             if o.get("type") == "rect":
@@ -244,7 +210,6 @@ if px_per_mm:
                     "Lengte (m)": None,
                     "Oppervlakte (m²)": round(area_m2, 4),
                 })
-    # Posts
     if post_objs:
         for i, o in enumerate(post_objs, start=1):
             if o.get("type") == "line":
@@ -268,7 +233,7 @@ if px_per_mm:
                     "Oppervlakte (m²)": round(mantle_m2, 4),
                 })
 
-# Combineer met vorige pagina resultaten (niet persistent tussen rerenders behalve in session)
+import pandas as pd
 if rows:
     df = pd.DataFrame(rows)
 else:
@@ -278,7 +243,6 @@ st.subheader("3) Resultaten (diameter per lijn aanpasbaar)")
 if df.empty:
     st.warning("Nog geen objecten of schaal niet gezet voor deze pagina.")
 
-# Maak diameter kolom editable voor Paal/Buis
 if not df.empty:
     edited = st.data_editor(
         df,
@@ -290,7 +254,6 @@ if not df.empty:
         key=f"editor_{page_idx}",
     )
 
-    # Recompute surfaces using edited diameters
     def recompute_surfaces(df_edit: pd.DataFrame):
         panel_area = 0.0
         post_area = 0.0
@@ -302,14 +265,12 @@ if not df.empty:
                 out_rows.append(r)
             else:
                 L_m = float(r["Lengte (m)"] or 0)
-                dia = float(r["Diameter (mm)"] or default_post_diameter_mm)
-                # Herbereken op basis van L_m en dia (we kennen px_per_mm niet meer hier, dus gebruiken direct L_m)
+                dia = float(r["Diameter (mm)"] or 60.0)
                 mantle_m2 = (math.pi * dia * (L_m * 1000.0)) / 1_000_000.0
                 r["Oppervlakte (m²)"] = round(mantle_m2, 4)
                 post_area += mantle_m2
                 post_len_total += L_m
                 out_rows.append(r)
-                # Bewaar override
                 st.session_state.diameter_overrides[str(r["ID"])] = dia
         total = panel_area + post_area
         return pd.DataFrame(out_rows), panel_area, post_area, total, post_len_total
@@ -317,19 +278,13 @@ if not df.empty:
     edited, panel_area, post_area, total_area, post_len_total = recompute_surfaces(edited)
     st.session_state.results_df = edited
 
-    col_a, col_b, col_c = st.columns(3)
-    with col_a:
-        st.metric("Totaal paneel-oppervlak", f"{panel_area:.3f} m²")
-    with col_b:
-        st.metric("Totaal paal/buis-oppervlak", f"{post_area:.3f} m²")
-    with col_c:
-        st.metric("Totaal (m²)", f"{total_area:.3f} m²")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Totaal paneel-oppervlak", f"{panel_area:.3f} m²")
+    c2.metric("Totaal paal/buis-oppervlak", f"{post_area:.3f} m²")
+    c3.metric("Totaal (m²)", f"{total_area:.3f} m²")
     if post_len_total > 0:
         st.caption(f"Totale paal-/buislengte: **{post_len_total:.2f} m**")
 
-# -----------------------------
-# Export / Import
-# -----------------------------
 if export_csv and not st.session_state.results_df.empty:
     csv = st.session_state.results_df.to_csv(index=False).encode("utf-8")
     st.download_button("Download CSV", csv, file_name="hekwerk_oppervlakte_resultaten.csv", mime="text/csv")
@@ -357,55 +312,6 @@ if project_file is not None:
         results = payload.get("results", [])
         if results:
             st.session_state.results_df = pd.DataFrame(results)
-        st.success("Project geladen. Let op: bestaande tekeningen op het canvas kunnen niet automatisch worden teruggezet in deze MVP.")
+        st.success("Project geladen. (Canvas-vormen opnieuw tekenen is in deze versie nog niet mogelijk.)")
     except Exception as e:
         st.error(f"Kon project niet laden: {e}")
-
-st.markdown("""
----
-### 📦 Deploy-opties (Netlife klaarzetten)
-**Docker (aanbevolen intern):**
-
-**Dockerfile**
-```
-FROM python:3.11-slim
-RUN apt-get update && apt-get install -y poppler-utils && rm -rf /var/lib/apt/lists/*
-WORKDIR /app
-COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
-COPY . .
-ENV STREAMLIT_SERVER_ADDRESS=0.0.0.0 \
-    STREAMLIT_SERVER_PORT=8501 \
-    STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
-EXPOSE 8501
-CMD ["streamlit", "run", "app.py", "--server.enableCORS=false", "--server.enableXsrfProtection=false"]
-```
-
-**requirements.txt**
-```
-streamlit
-streamlit-drawable-canvas
-pdf2image
-pillow
-pandas
-numpy
-```
-
-**Run**
-```
-docker build -t hekwerk-app .
-docker run -d --name hekwerk -p 8501:8501 hekwerk-app
-```
-
-**Windows .exe (zonder Docker):**
-1) `pip install -r requirements.txt` + Poppler installeren (zodat `pdf2image` werkt).
-2) `pip install pyinstaller`
-3) `pyinstaller --onefile app.py`
-4) Start `dist/app.exe` → drag & drop PDF en werken.
-
-> Indien Netlife een interne container registry of orkestratie (bv. Kubernetes) gebruikt, push de image en publiceer via de standaard ingress/proxy. De app is volledig self-contained.
-
-**Beveiliging (optioneel):** voeg simpele wachtwoordprotectie toe met `streamlit-authenticator` of zet 'm achter jullie reverse proxy met SSO.
-
-**Bekende beperking MVP:** herladen van getekende vormen in het canvas is (nog) niet mogelijk; wel worden schaal/diameters/resultaten opgeslagen. Dat kunnen we in v3 oplossen door objecten te serialiseren en terug te injecteren.
-""")

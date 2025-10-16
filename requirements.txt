@@ -1,6 +1,6 @@
 streamlit
 streamlit-drawable-canvas
-pdf2image
+pypdfium2
 pillow
 pandas
 numpy
